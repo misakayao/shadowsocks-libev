@@ -439,6 +439,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
     size_t abuf_len  = abuf->len;
     int sni_detected = 0;
     int hostname_len = 0;
+    int user_head_len = 64;
 
     char *hostname;
     uint16_t dst_port = ntohs(*(uint16_t *)(abuf->data + abuf->len - 2));
@@ -466,6 +467,11 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
             ss_free(hostname);
         }
     }
+    
+    memmove(abuf->data + user_head_len, abuf->data, abuf->len);
+    memset(abuf->data, 0, user_head_len);
+    memcpy(abuf->data, "anonymous", strlen("anonymous") + 1);
+    abuf->len += user_head_len;
 
     if (server_handshake_reply(EV_A_ w, 0, &response) < 0)
         return -1;
