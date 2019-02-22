@@ -499,8 +499,9 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
             // Reconstruct address buffer
             abuf->len = 0;
             // add user field
+            memmove(abuf->data + user_head_len, abuf->data, abuf->len);
             memset(abuf->data, 0, user_head_len);
-            memcpy(abuf->data, "123", strlen("123") + 1);
+            memcpy(abuf->data, "anonymous", strlen("anonymous") + 1);
             abuf->len += user_head_len;
             abuf->data[abuf->len++] = 3;
             abuf->data[abuf->len++] = ret;
@@ -521,7 +522,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
     if (!sni_detected) {
         memmove(abuf->data + user_head_len, abuf->data, abuf->len);
         memset(abuf->data, 0, user_head_len);
-        memcpy(abuf->data, "123", strlen("123") + 1);
+        memcpy(abuf->data, "anonymous", strlen("anonymous") + 1);
         abuf->len += user_head_len;
     }
 
