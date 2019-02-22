@@ -340,25 +340,30 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
 
     struct socks5_request *request = (struct socks5_request *)buf->data;
     size_t request_len             = sizeof(struct socks5_request);
+    struct sockaddr_in sock_addr;
+    memset(&sock_addr, 0, sizeof(sock_addr));
 
     if (buf->len < request_len) {
         return -1;
     }
 
-    struct socks5_response response;
-    response.ver  = SVERSION;
-    response.rep  = SOCKS5_REP_SUCCEEDED;
-    response.rsv  = 0;
-    response.atyp = SOCKS5_ATYP_IPV4;
+    int udp_assc = 0;
 
-    if (request->cmd == SOCKS5_CMD_UDP_ASSOCIATE) {
+    if (request->cmd == 3) {
+        udp_assc = 1;
+        socklen_t addr_len = sizeof(sock_addr);
+        getsockname(udp_fd, (struct sockaddr *)&sock_addr,
+                    &addr_len);
         if (verbose) {
             LOGI("udp assc request accepted");
         }
-        return server_handshake_reply(EV_A_ w, 1, &response);
-    } else if (request->cmd != SOCKS5_CMD_CONNECT) {
+    } else if (request->cmd != 1) {
         LOGE("unsupported cmd: %d", request->cmd);
-        response.rep = SOCKS5_REP_CMD_NOT_SUPPORTED;
+        struct socks5_response response;
+        response.ver  = SVERSION;
+        response.rep  = SOCKS5_REP_CMD_NOT_SUPPORTED;
+        response.rsv  = 0;
+        response.atyp = 1;
         char *send_buf = (char *)&response;
         send(server->fd, send_buf, 4, 0);
         close_and_free_remote(EV_A_ remote);
@@ -366,7 +371,47 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         return -1;
     }
 
-    char host[MAX_HOSTNAME_LEN+1], ip[INET6_ADDRSTRLEN], port[16];
+    // Fake reply
+    if (server->stage == STAGE_HANDSHAKE) {
+        struct socks5_response response;
+        response.ver  = SVERSION;
+        response.rep  = 0;
+        response.rsv  = 0;
+        response.atyp = 1;
+
+        buffer_t resp_to_send;
+        buffer_t *resp_buf = &resp_to_send;
+        balloc(resp_buf, BUF_SIZE);
+
+        memcpy(resp_buf->data, &response, sizeof(struct socks5_response));
+        memcpy(resp_buf->data + sizeof(struct socks5_response),
+               &sock_addr.sin_addr, sizeof(sock_addr.sin_addr));
+        memcpy(resp_buf->data + sizeof(struct socks5_response) +
+               sizeof(sock_addr.sin_addr),
+               &sock_addr.sin_port, sizeof(sock_addr.sin_port));
+
+        int reply_size = sizeof(struct socks5_response) +
+                         sizeof(sock_addr.sin_addr) + sizeof(sock_addr.sin_port);
+
+        int s = send(server->fd, resp_buf->data, reply_size, 0);
+
+        bfree(resp_buf);
+
+        if (s < reply_size) {
+            LOGE("failed to send fake reply");
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return -1;
+        }
+        if (udp_assc) {
+            // Wait until client closes the connection
+            return -1;
+        }
+
+        server->stage = STAGE_PARSE;
+    }
+
+    char host[257], ip[INET6_ADDRSTRLEN], port[16];
 
     buffer_t *abuf = server->abuf;
     abuf->idx = 0;
@@ -376,7 +421,8 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
     int atyp = request->atyp;
 
     // get remote addr and port
-    if (atyp == SOCKS5_ATYP_IPV4) {
+    if (atyp == 1) {
+        // IP V4
         size_t in_addr_len = sizeof(struct in_addr);
         if (buf->len < request_len + in_addr_len + 2) {
             return -1;
@@ -386,14 +432,12 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
 
         if (acl || verbose) {
             uint16_t p = ntohs(*(uint16_t *)(buf->data + request_len + in_addr_len));
-            if (!inet_ntop(AF_INET, (const void *)(buf->data + request_len),
-                           ip, INET_ADDRSTRLEN)) {
-                LOGI("inet_ntop(AF_INET): %s", strerror(errno));
-                ip[0] = '\0';
-            }
+            inet_ntop(AF_INET, (const void *)(buf->data + request_len),
+                      ip, INET_ADDRSTRLEN);
             sprintf(port, "%d", p);
         }
-    } else if (atyp == SOCKS5_ATYP_DOMAIN) {
+    } else if (atyp == 3) {
+        // Domain name
         uint8_t name_len = *(uint8_t *)(buf->data + request_len);
         if (buf->len < request_len + 1 + name_len + 2) {
             return -1;
@@ -404,12 +448,13 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
 
         if (acl || verbose) {
             uint16_t p =
-                ntohs(*(uint16_t *)(buf->data + request_len + 1 + name_len));
+                    ntohs(*(uint16_t *)(buf->data + request_len + 1 + name_len));
             memcpy(host, buf->data + request_len + 1, name_len);
             host[name_len] = '\0';
             sprintf(port, "%d", p);
         }
-    } else if (atyp == SOCKS5_ATYP_IPV6) {
+    } else if (atyp == 4) {
+        // IP V6
         size_t in6_addr_len = sizeof(struct in6_addr);
         if (buf->len < request_len + in6_addr_len + 2) {
             return -1;
@@ -419,18 +464,12 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
 
         if (acl || verbose) {
             uint16_t p = ntohs(*(uint16_t *)(buf->data + request_len + in6_addr_len));
-            if (!inet_ntop(AF_INET6, (const void *)(buf->data + request_len),
-                           ip, INET6_ADDRSTRLEN)) {
-                LOGI("inet_ntop(AF_INET6): %s", strerror(errno));
-                ip[0] = '\0';
-            }
+            inet_ntop(AF_INET6, (const void *)(buf->data + request_len),
+                      ip, INET6_ADDRSTRLEN);
             sprintf(port, "%d", p);
         }
     } else {
         LOGE("unsupported addrtype: %d", request->atyp);
-        response.rep = SOCKS5_REP_ADDRTYPE_NOT_SUPPORTED;
-        char *send_buf = (char *)&response;
-        send(server->fd, send_buf, 4, 0);
         close_and_free_remote(EV_A_ remote);
         close_and_free_server(EV_A_ server);
         return -1;
@@ -438,43 +477,54 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
 
     size_t abuf_len  = abuf->len;
     int sni_detected = 0;
-    int hostname_len = 0;
+    int ret          = 0;
     int user_head_len = 64;
 
     char *hostname;
     uint16_t dst_port = ntohs(*(uint16_t *)(abuf->data + abuf->len - 2));
 
-    if (atyp == SOCKS5_ATYP_IPV4 || atyp == SOCKS5_ATYP_IPV6) {
+    if (atyp == 1 || atyp == 4) {
         if (dst_port == http_protocol->default_port)
-            hostname_len = http_protocol->parse_packet(buf->data + 3 + abuf->len,
+            ret = http_protocol->parse_packet(buf->data + 3 + abuf->len,
                                               buf->len - 3 - abuf->len, &hostname);
         else if (dst_port == tls_protocol->default_port)
-            hostname_len = tls_protocol->parse_packet(buf->data + 3 + abuf->len,
+            ret = tls_protocol->parse_packet(buf->data + 3 + abuf->len,
                                              buf->len - 3 - abuf->len, &hostname);
-        if (hostname_len == -1 && buf->len < BUF_SIZE && server->stage != STAGE_SNI) {
-            if (server_handshake_reply(EV_A_ w, 0, &response) < 0)
-                return -1;
+        if (ret == -1 && buf->len < BUF_SIZE && server->stage != STAGE_SNI) {
             server->stage = STAGE_SNI;
             ev_timer_start(EV_A_ & server->delayed_connect_watcher);
             return -1;
-        } else if (hostname_len > 0) {
+        } else if (ret > 0) {
             sni_detected = 1;
+            // Reconstruct address buffer
+            abuf->len = 0;
+            // add user field
+            memset(abuf->data, 0, user_head_len);
+            memcpy(abuf->data, "123", strlen("123") + 1);
+            abuf->len += user_head_len;
+            abuf->data[abuf->len++] = 3;
+            abuf->data[abuf->len++] = ret;
+            memcpy(abuf->data + abuf->len, hostname, ret);
+            abuf->len += ret;
+            dst_port = htons(dst_port);
+            memcpy(abuf->data + abuf->len, &dst_port, 2);
+            abuf->len += 2;
             if (acl || verbose) {
-                hostname_len = hostname_len > MAX_HOSTNAME_LEN ? MAX_HOSTNAME_LEN : hostname_len;
-                memcpy(host, hostname, hostname_len);
-                host[hostname_len] = '\0';
+                memcpy(host, hostname, ret);
+                host[ret] = '\0';
             }
             ss_free(hostname);
         }
     }
-    
-    memmove(abuf->data + user_head_len, abuf->data, abuf->len);
-    memset(abuf->data, 0, user_head_len);
-    memcpy(abuf->data, "anonymous", strlen("anonymous") + 1);
-    abuf->len += user_head_len;
 
-    if (server_handshake_reply(EV_A_ w, 0, &response) < 0)
-        return -1;
+    // add user field
+    if (!sni_detected) {
+        memmove(abuf->data + user_head_len, abuf->data, abuf->len);
+        memset(abuf->data, 0, user_head_len);
+        memcpy(abuf->data, "123", strlen("123") + 1);
+        abuf->len += user_head_len;
+    }
+
     server->stage = STAGE_STREAM;
 
     buf->len -= (3 + abuf_len);
@@ -483,27 +533,29 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
     }
 
     if (verbose) {
-        if (sni_detected || atyp == SOCKS5_ATYP_DOMAIN)
+        if (sni_detected || atyp == 3)
             LOGI("connect to %s:%s", host, port);
-        else if (atyp == SOCKS5_ATYP_IPV4)
+        else if (atyp == 1)
             LOGI("connect to %s:%s", ip, port);
-        else if (atyp == SOCKS5_ATYP_IPV6)
+        else if (atyp == 4)
             LOGI("connect to [%s]:%s", ip, port);
     }
 
     if (acl
-#ifdef __ANDROID__
+        #ifdef __ANDROID__
         && !(vpn && strcmp(port, "53") == 0)
 #endif
-        ) {
+            ) {
         int bypass   = 0;
+#ifndef __ANDROID__
         int resolved = 0;
+#endif
         struct sockaddr_storage storage;
         memset(&storage, 0, sizeof(struct sockaddr_storage));
         int err;
 
         int host_match = 0;
-        if (sni_detected || atyp == SOCKS5_ATYP_DOMAIN)
+        if (sni_detected || atyp == 3)
             host_match = acl_match_host(host);
 
         if (host_match > 0)
@@ -511,90 +563,82 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         else if (host_match < 0)
             bypass = 0;                             // proxy hostnames in white list
         else {
-            if (atyp == SOCKS5_ATYP_DOMAIN
-#ifdef __ANDROID__
-                && !vpn
-#endif
-                ) {           // resolve domain so we can bypass domain with geoip
-                if (get_sockaddr(host, port, &storage, 0, ipv6first))
-                    goto not_bypass;
-                resolved = 1;
-                switch (((struct sockaddr *)&storage)->sa_family) {
-                case AF_INET:
-                {
-                    struct sockaddr_in *addr_in = (struct sockaddr_in *)&storage;
-                    if (!inet_ntop(AF_INET, &(addr_in->sin_addr), ip, INET_ADDRSTRLEN))
-                        goto not_bypass;
-                    break;
-                }
-                case AF_INET6:
-                {
-                    struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&storage;
-                    if (!inet_ntop(AF_INET6, &(addr_in6->sin6_addr), ip, INET6_ADDRSTRLEN))
-                        goto not_bypass;
-                    break;
-                }
-                default:
-                    goto not_bypass;
+#ifndef __ANDROID__
+            if (atyp == 3) {                        // resolve domain so we can bypass domain with geoip
+                err = get_sockaddr(host, port, &storage, 0, ipv6first);
+                if (err != -1) {
+                    resolved = 1;
+                    switch (((struct sockaddr *)&storage)->sa_family) {
+                    case AF_INET:
+                    {
+                        struct sockaddr_in *addr_in = (struct sockaddr_in *)&storage;
+                        inet_ntop(AF_INET, &(addr_in->sin_addr), ip, INET_ADDRSTRLEN);
+                        break;
+                    }
+                    case AF_INET6:
+                    {
+                        struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&storage;
+                        inet_ntop(AF_INET6, &(addr_in6->sin6_addr), ip, INET6_ADDRSTRLEN);
+                        break;
+                    }
+                    default:
+                        break;
+                    }
                 }
             }
-
-            int ip_match = (resolved || atyp == SOCKS5_ATYP_IPV4
-                    || atyp == SOCKS5_ATYP_IPV6) ? acl_match_host(ip) : 0;
-
+#endif
+            int ip_match = acl_match_host(ip);
             switch (get_acl_mode()) {
-            case BLACK_LIST:
-                if (ip_match > 0)
-                    bypass = 1;                                               // bypass IPs in black list
-                break;
-            case WHITE_LIST:
-                bypass = 1;
-                if (ip_match < 0)
-                    bypass = 0;                                               // proxy IPs in white list
-                break;
+                case BLACK_LIST:
+                    if (ip_match > 0)
+                        bypass = 1;                                               // bypass IPs in black list
+                    break;
+                case WHITE_LIST:
+                    bypass = 1;
+                    if (ip_match < 0)
+                        bypass = 0;                                               // proxy IPs in white list
+                    break;
             }
         }
 
         if (bypass) {
             if (verbose) {
-                if (sni_detected || atyp == SOCKS5_ATYP_DOMAIN)
+                if (sni_detected || atyp == 3)
                     LOGI("bypass %s:%s", host, port);
                 else if (atyp == 1)
                     LOGI("bypass %s:%s", ip, port);
                 else if (atyp == 4)
                     LOGI("bypass [%s]:%s", ip, port);
             }
-            if (atyp == SOCKS5_ATYP_DOMAIN && !resolved)
-#ifdef __ANDROID__
-                if (vpn)
-                    goto not_bypass;
-                else
-#endif
+#ifndef __ANDROID__
+            if (atyp == 3 && resolved != 1)
                 err = get_sockaddr(host, port, &storage, 0, ipv6first);
             else
-                err = get_sockaddr(ip, port, &storage, 0, ipv6first);
+#endif
+            err = get_sockaddr(ip, port, &storage, 0, ipv6first);
             if (err != -1) {
                 remote = create_remote(server->listener, (struct sockaddr *)&storage, 1);
+                if (remote != NULL)
+                    remote->direct = 1;
             }
         }
     }
 
-not_bypass:
     // Not bypass
     if (remote == NULL) {
         remote = create_remote(server->listener, NULL, 0);
 
         if (sni_detected && acl
-#ifdef __ANDROID__
-            && is_remote_dns
+            #ifdef __ANDROID__
+            && !is_remote_dns
 #endif
-            ) {
+                ) {
             // Reconstruct address buffer
             abuf->len               = 0;
             abuf->data[abuf->len++] = 3;
-            abuf->data[abuf->len++] = hostname_len;
-            memcpy(abuf->data + abuf->len, host, hostname_len);
-            abuf->len += hostname_len;
+            abuf->data[abuf->len++] = ret;
+            memcpy(abuf->data + abuf->len, host, ret);
+            abuf->len += ret;
             dst_port   = htons(dst_port);
             memcpy(abuf->data + abuf->len, &dst_port, 2);
             abuf->len += 2;
@@ -1537,7 +1581,8 @@ main(int argc, char **argv)
             break;
         case 's':
             if (remote_num < MAX_REMOTE_NUM) {
-                parse_addr(optarg, &remote_addr[remote_num++]);
+                remote_addr[remote_num].host   = optarg;
+                remote_addr[remote_num++].port = NULL;
             }
             break;
         case 'p':
@@ -1688,7 +1733,7 @@ main(int argc, char **argv)
         if (ipv6first == 0) {
             ipv6first = conf->ipv6_first;
         }
-        if (acl == 0 && conf->acl != NULL) {
+        if (acl == 0) {
             LOGI("initializing acl...");
             acl = !init_acl(conf->acl);
         }
