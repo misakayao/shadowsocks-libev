@@ -278,60 +278,6 @@ delayed_connect_cb(EV_P_ ev_timer *watcher, int revents)
 }
 
 static int
-server_handshake_reply(EV_P_ ev_io *w, int udp_assc, struct socks5_response *response)
-{
-    server_ctx_t *server_recv_ctx = (server_ctx_t *)w;
-    server_t *server              = server_recv_ctx->server;
-    remote_t *remote              = server->remote;
-    if (server->stage != STAGE_HANDSHAKE)
-        return 0;
-
-    struct sockaddr_in sock_addr;
-    if (udp_assc) {
-        socklen_t addr_len = sizeof(sock_addr);
-        if (getsockname(server->fd, (struct sockaddr *)&sock_addr, &addr_len) < 0) {
-            LOGE("getsockname: %s", strerror(errno));
-            response->rep = SOCKS5_REP_CONN_REFUSED;
-            send(server->fd, (char *)response, sizeof(struct socks5_response), 0);
-            close_and_free_remote(EV_A_ remote);
-            close_and_free_server(EV_A_ server);
-            return -1;
-        }
-    } else
-        memset(&sock_addr, 0, sizeof(sock_addr));
-
-    buffer_t resp_to_send;
-    buffer_t *resp_buf = &resp_to_send;
-    balloc(resp_buf, BUF_SIZE);
-
-    memcpy(resp_buf->data, response, sizeof(struct socks5_response));
-    memcpy(resp_buf->data + sizeof(struct socks5_response),
-           &sock_addr.sin_addr, sizeof(sock_addr.sin_addr));
-    memcpy(resp_buf->data + sizeof(struct socks5_response) +
-           sizeof(sock_addr.sin_addr),
-           &sock_addr.sin_port, sizeof(sock_addr.sin_port));
-
-    int reply_size = sizeof(struct socks5_response) +
-                     sizeof(sock_addr.sin_addr) + sizeof(sock_addr.sin_port);
-
-    int s = send(server->fd, resp_buf->data, reply_size, 0);
-
-    bfree(resp_buf);
-
-    if (s < reply_size) {
-        LOGE("failed to send fake reply");
-        close_and_free_remote(EV_A_ remote);
-        close_and_free_server(EV_A_ server);
-        return -1;
-    }
-    if (udp_assc) {
-        // Wait until client closes the connection
-        return -1;
-    }
-    return 0;
-}
-
-static int
 server_handshake(EV_P_ ev_io *w, buffer_t *buf)
 {
     server_ctx_t *server_recv_ctx = (server_ctx_t *)w;
