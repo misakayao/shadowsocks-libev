@@ -487,7 +487,11 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                 } else {                             // IPv4
                     port = (((struct sockaddr_in *)&(server->destaddr))->sin_port);
                 }
-
+                int user_head_len = 64;
+                memmove(abuf->data + user_head_len, abuf->data, abuf->len);
+                memset(abuf->data, 0, user_head_len);
+                memcpy(abuf->data, "anonymous", strlen("anonymous") + 1);
+                abuf->len += user_head_len;
 
                 abuf->data[abuf->len++] = 3;          // Type 3 is hostname
                 abuf->data[abuf->len++] = server->hostname_len;
