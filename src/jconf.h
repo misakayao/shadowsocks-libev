@@ -75,6 +75,7 @@ typedef struct {
     char *plugin_opts;
     int fast_open;
     int reuse_port;
+    int disable_sni;
     int nofile;
     char *nameserver;
     int dscp_num;
