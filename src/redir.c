@@ -104,7 +104,7 @@ static int mode      = TCP_ONLY;
 #ifdef HAVE_SETRLIMIT
 static int nofile    = 0;
 #endif
-static int fast_open = 0;
+       int fast_open = 0;
 static int no_delay  = 0;
 
 static struct ev_signal sigint_watcher;
