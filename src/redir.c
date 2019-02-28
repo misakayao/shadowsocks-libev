@@ -90,12 +90,19 @@ int reuse_port     = 0;
 int keep_resolving = 1;
 int disable_sni    = 0;
 
+#ifdef __ANDROID__
+int vpn        = 0;
+uint64_t tx    = 0;
+uint64_t rx    = 0;
+ev_tstamp last = 0;
+#endif
+
 static crypto_t *crypto;
 
 static int ipv6first = 0;
 static int mode      = TCP_ONLY;
 #ifdef HAVE_SETRLIMIT
-static int nofile = 0;
+static int nofile    = 0;
 #endif
        int fast_open = 0;
 static int no_delay  = 0;
@@ -104,6 +111,19 @@ static int ret_val   = 0;
 static struct ev_signal sigint_watcher;
 static struct ev_signal sigterm_watcher;
 static struct ev_signal sigchld_watcher;
+
+#ifdef __ANDROID__
+void
+stat_update_cb()
+{
+    ev_tstamp now = ev_time();
+    if (now - last > 0.5) {
+        send_traffic_stat(tx, rx);
+        last = now;
+    }
+}
+
+#endif
 
 static int
 getdestaddr(int fd, struct sockaddr_storage *destaddr)
@@ -487,11 +507,6 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                 } else {                             // IPv4
                     port = (((struct sockaddr_in *)&(server->destaddr))->sin_port);
                 }
-                int user_head_len = 64;
-                memmove(abuf->data + user_head_len, abuf->data, abuf->len);
-                memset(abuf->data, 0, user_head_len);
-                memcpy(abuf->data, "anonymous", strlen("anonymous") + 1);
-                abuf->len += user_head_len;
 
                 abuf->data[abuf->len++] = 3;          // Type 3 is hostname
                 abuf->data[abuf->len++] = server->hostname_len;
@@ -521,6 +536,13 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
             }
 
             abuf->len += 2;
+
+            int iUserHeadLen = 64;
+                        memmove(abuf->data+iUserHeadLen,abuf->data, abuf->len);
+                        memset(abuf->data,0,iUserHeadLen);
+                        memcpy(abuf->data,"bob2",sizeof("bob2"));
+                        abuf->len += iUserHeadLen;
+                        LOGI("bob2");
 
             int err = crypto->encrypt(abuf, server->e_ctx, BUF_SIZE);
             if (err) {
@@ -702,8 +724,8 @@ new_server(int fd)
     server->hostname     = NULL;
     server->hostname_len = 0;
 
-    server->e_ctx = ss_malloc(sizeof(cipher_ctx_t));
-    server->d_ctx = ss_malloc(sizeof(cipher_ctx_t));
+    server->e_ctx = ss_align(sizeof(cipher_ctx_t));
+    server->d_ctx = ss_align(sizeof(cipher_ctx_t));
     crypto->ctx_init(crypto->cipher, server->e_ctx, 1);
     crypto->ctx_init(crypto->cipher, server->d_ctx, 0);
 
