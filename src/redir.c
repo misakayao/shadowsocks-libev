@@ -104,9 +104,8 @@ static int mode      = TCP_ONLY;
 #ifdef HAVE_SETRLIMIT
 static int nofile    = 0;
 #endif
-       int fast_open = 0;
+static int fast_open = 0;
 static int no_delay  = 0;
-static int ret_val   = 0;
 
 static struct ev_signal sigint_watcher;
 static struct ev_signal sigterm_watcher;
@@ -369,8 +368,6 @@ delayed_connect_cb(EV_P_ ev_timer *watcher, int revents)
     int r = connect(remote->fd, remote->addr,
                     get_sockaddr_len(remote->addr));
 
-    remote->addr = NULL;
-
     if (r == -1 && errno != CONNECT_IN_PROGRESS) {
         ERROR("connect");
         close_and_free_remote(EV_A_ remote);
@@ -461,12 +458,12 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     }
 
     // Disable TCP_NODELAY after the first response are sent
-    if (!remote->recv_ctx->connected && !no_delay) {
+    if (!remote->recv_ctx->connected) {
         int opt = 0;
         setsockopt(server->fd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
         setsockopt(remote->fd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
+        remote->recv_ctx->connected = 1;
     }
-    remote->recv_ctx->connected = 1;
 }
 
 static void
@@ -500,7 +497,7 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
             balloc(abuf, BUF_SIZE);
 
             if (server->hostname_len > 0
-                && validate_hostname(server->hostname, server->hostname_len)) {     // HTTP/SNI
+                    && validate_hostname(server->hostname, server->hostname_len)) { // HTTP/SNI
                 uint16_t port;
                 if (AF_INET6 == server->destaddr.ss_family) { // IPv6
                     port = (((struct sockaddr_in6 *)&(server->destaddr))->sin6_port);
@@ -580,39 +577,30 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
         return;
     } else {
         // has data to send
-        int s = -1;
-
+        ssize_t s;
         if (remote->addr != NULL) {
-#if defined(TCP_FASTOPEN_CONNECT)
-            int optval = 1;
-            if (setsockopt(remote->fd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT,
-                           (void *)&optval, sizeof(optval)) < 0)
-                FATAL("failed to set TCP_FASTOPEN_CONNECT");
-            s = connect(remote->fd, remote->addr, get_sockaddr_len(remote->addr));
-            if (s == 0)
-                s = send(remote->fd, remote->buf->data, remote->buf->len, 0);
-#elif defined(MSG_FASTOPEN)
             s = sendto(remote->fd, remote->buf->data + remote->buf->idx,
                        remote->buf->len, MSG_FASTOPEN, remote->addr,
                        get_sockaddr_len(remote->addr));
-#else
-            FATAL("tcp fast open is not supported on this platform");
-#endif
+
+            if (s == -1 && (errno == EOPNOTSUPP || errno == EPROTONOSUPPORT ||
+                errno == ENOPROTOOPT)) {
+                fast_open = 0;
+                LOGE("fast open is not supported on this platform");
+                close_and_free_remote(EV_A_ remote);
+                close_and_free_server(EV_A_ server);
+                return;
+            }
 
             remote->addr = NULL;
 
             if (s == -1) {
-                if (errno == CONNECT_IN_PROGRESS) {
+                if (errno == CONNECT_IN_PROGRESS || errno == EAGAIN
+                    || errno == EWOULDBLOCK) {
                     ev_io_start(EV_A_ & remote_send_ctx->io);
                     ev_timer_start(EV_A_ & remote_send_ctx->watcher);
                 } else {
-                    if (errno == EOPNOTSUPP || errno == EPROTONOSUPPORT ||
-                        errno == ENOPROTOOPT) {
-                        fast_open = 0;
-                        LOGE("fast open is not supported on this platform");
-                    } else {
-                        ERROR("fast_open_connect");
-                    }
+                    ERROR("connect");
                     close_and_free_remote(EV_A_ remote);
                     close_and_free_server(EV_A_ server);
                 }
@@ -724,8 +712,8 @@ new_server(int fd)
     server->hostname     = NULL;
     server->hostname_len = 0;
 
-    server->e_ctx = ss_malloc(sizeof(cipher_ctx_t));
-    server->d_ctx = ss_malloc(sizeof(cipher_ctx_t));
+    server->e_ctx = ss_aligned_malloc(sizeof(cipher_ctx_t));
+    server->d_ctx = ss_aligned_malloc(sizeof(cipher_ctx_t));
     crypto->ctx_init(crypto->cipher, server->e_ctx, 1);
     crypto->ctx_init(crypto->cipher, server->d_ctx, 0);
 
@@ -892,7 +880,6 @@ signal_cb(EV_P_ ev_signal *w, int revents)
         case SIGCHLD:
             if (!is_plugin_running()) {
                 LOGE("plugin service exit unexpectedly");
-                ret_val = -1;
             } else
                 return;
         case SIGINT:
@@ -901,6 +888,7 @@ signal_cb(EV_P_ ev_signal *w, int revents)
             ev_signal_stop(EV_DEFAULT, &sigterm_watcher);
             ev_signal_stop(EV_DEFAULT, &sigchld_watcher);
 
+            keep_resolving = 0;
             ev_unloop(EV_A_ EVUNLOOP_ALL);
         }
     }
@@ -1060,7 +1048,7 @@ main(int argc, char **argv)
 
     if (argc == 1) {
         if (conf_path == NULL) {
-            conf_path = get_default_conf();
+            conf_path = DEFAULT_CONF_PATH;
         }
     }
 
@@ -1331,5 +1319,5 @@ main(int argc, char **argv)
         stop_plugin();
     }
 
-    return ret_val;
+    return 0;
 }
