@@ -458,12 +458,12 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     }
 
     // Disable TCP_NODELAY after the first response are sent
-    if (!remote->recv_ctx->connected) {
+    if (!remote->recv_ctx->connected && !no_delay) {
         int opt = 0;
         setsockopt(server->fd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
         setsockopt(remote->fd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
-        remote->recv_ctx->connected = 1;
     }
+    remote->recv_ctx->connected = 1;
 }
 
 static void
@@ -1057,7 +1057,7 @@ main(int argc, char **argv)
 
     if (argc == 1) {
         if (conf_path == NULL) {
-            conf_path = DEFAULT_CONF_PATH;
+            conf_path = get_default_conf();
         }
     }
 
